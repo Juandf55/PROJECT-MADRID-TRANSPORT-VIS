@@ -1,0 +1,17 @@
+# User requested ignores
+DATASETS/
+.agent/
+
+
+# Python common ignores
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+.ipynb_checkpoints/
+.vscode/
+.idea/
