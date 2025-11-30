@@ -5,6 +5,10 @@ import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import gaussian_kde
+from shapely.geometry import box
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, r2_score
 import random
 
 
@@ -155,7 +159,7 @@ x_stops = all_stops.geometry.x
 y_stops = all_stops.geometry.y
 xmin, ymin, xmax, ymax = gdf_madrid_boundaries.total_bounds
 
-RESOLUTION = 400 #in how many pixeles we will observe the KDE
+RESOLUTION = 40 #in how many pixeles we will observe the KDE
 xx, yy = np.mgrid[xmin:xmax:complex(0, RESOLUTION), ymin:ymax:complex(0, RESOLUTION)] #two main matrix, [500 * 500] dividing the space in parts
 positions = np.vstack([xx.ravel(), yy.ravel()]) # one "inline" array for xx and other for yy with all the divisions : [2, 50.000]
 values = np.vstack([x_stops, y_stops])
@@ -243,9 +247,6 @@ print("Image saved as 'ChoroplethMap.png'")
 
 # ::::::::::::::::::::::: OPPORTUNITY SCORE MODEL :::::::::::::::::::::::::
 
-print("Generating Opportunity Score Model...")
-
-
 # Ensure CRS is projected (meters) for area calculation. It is already EPSG:3857.
 gdf_choropleth['area_km2'] = gdf_choropleth.geometry.area / 10**6
 gdf_choropleth['pop_density'] = gdf_choropleth['Total'] / gdf_choropleth['area_km2']
@@ -258,60 +259,41 @@ max_pop = gdf_choropleth['pop_density_log'].max()
 gdf_choropleth['Pop_Score'] = (gdf_choropleth['pop_density_log'] - min_pop) / (max_pop - min_pop)
 gdf_choropleth['Pop_Score'] = gdf_choropleth['Pop_Score'].fillna(0)
 
-
-# We reuse xx, yy from the KDE step.
-# Flatten the grid coordinates
-x_flat = xx.ravel()
+x_flat = xx.ravel() # We reuse xx, yy from the KDE step.
 y_flat = yy.ravel()
 
 # Create a GeoDataFrame for the grid points
 gdf_grid = gpd.GeoDataFrame(
-    {'geometry': gpd.points_from_xy(x_flat, y_flat)},
+    {'geometry': gpd.points_from_xy(x_flat, y_flat)}, #transforms the array of points into a geometry object
     crs="EPSG:3857"
 )
 
-# Perform Spatial Join to assign Municipality info to each grid point
-# We only need the Pop_Score and Municipality Name
-gdf_grid_joined = gpd.sjoin(
+gdf_grid_joined = gpd.sjoin( #assign Municipality info to each grid point
     gdf_grid, 
     gdf_choropleth[['geometry', 'DS_NOMBRE', 'Pop_Score']], 
     how='left', 
     predicate='within'
 )
 
-# Fill NaN values (points outside any municipality) with 0
+print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", gdf_grid_joined.info())
+
 gdf_grid_joined['Pop_Score'] = gdf_grid_joined['Pop_Score'].fillna(0)
 gdf_grid_joined['DS_NOMBRE'] = gdf_grid_joined['DS_NOMBRE'].fillna("Unknown")
 
-# --- Step 3: Calculate Final Opportunity Score ---
 
 
-# Transport Score: f_grid is already calculated (0-100).
-# We need it flattened to match the grid points.
-# Note: f_grid comes from f_norm_log which is 0-100.
-# The user wants: (1 - Transport_Score) * 0.4.
-# So we need Transport_Score in 0-1 range.
+# Note: f_grid comes from f_norm_log which is 0-100. So we need Transport_Score in 0-1 range.
 transport_score_flat = f_grid.ravel() / 100.0 
-
-# Pop Score is already 0-1.
 pop_score_flat = gdf_grid_joined['Pop_Score'].values
-
-# Formula: Final_Score = (Pop_Score * 0.6) + ((1 - Transport_Score) * 0.4)
 final_score_flat = (pop_score_flat * 0.6) + ((1 - transport_score_flat) * 0.4)
-
-# Scale to 0-100 for the final output
 final_score_100 = final_score_flat * 100
-
-# Add to GDF for export
 gdf_grid_joined['Opportunity_Score'] = final_score_100
 
-# --- Step 4: Visualization (Opportunity Map) ---
 # Reshape final score back to grid shape for plotting
 final_score_grid = final_score_100.reshape(xx.shape)
 
 fig3, ax3 = plt.subplots(figsize=(20, 20))
 
-# Plot Base Map
 gdf_madrid_boundaries.plot(ax=ax3, facecolor='none', edgecolor='black', linewidth=0.3, alpha=0.5)
 
 # Plot Opportunity Score as a Heatmap/Grid
@@ -336,8 +318,7 @@ plt.savefig("OpportunityMap.png", dpi=300, bbox_inches='tight')
 print("Image saved as 'OpportunityMap.png'")
 
 
-# --- Step 5: Export Ranking to Excel ---
-# Create DataFrame for export
+
 # We need Lat/Lon in degrees (EPSG:4326) for the report
 gdf_grid_joined_wgs84 = gdf_grid_joined.to_crs(epsg=4326)
 
@@ -361,3 +342,132 @@ print(f"Ranking saved to '{output_csv}'")
 
 print("Top 5 Opportunity Zones:")
 print(df_export.head())
+
+# ::::::::::::::::::::::: MACHINE LEARNING MODEL :::::::::::::::::::::::::
+
+
+CELL_SIZE = 500
+cols = np.arange(xmin, xmax, CELL_SIZE)
+rows = np.arange(ymin, ymax, CELL_SIZE)
+
+polygons = []
+for x in cols:
+    for y in rows:
+        polygons.append(
+            gpd.GeoSeries([box(x, y, x + CELL_SIZE, y + CELL_SIZE)], crs="EPSG:3857")[0]
+        )
+
+gdf_ml_grid = gpd.GeoDataFrame({'geometry': polygons}, crs="EPSG:3857")
+print(f"Created ML Grid with {len(gdf_ml_grid)} cells.")
+
+print("????????????????????????????????????", gdf_ml_grid.info())
+
+def count_points_in_polygons(polygons_gdf, points_gdf):
+    if points_gdf is None or points_gdf.empty:
+        return np.zeros(len(polygons_gdf))
+    
+    # Assign a dummy column for counting
+    points_gdf = points_gdf.copy()
+    points_gdf['count_val'] = 1
+    
+    # Spatial join
+    joined = gpd.sjoin(points_gdf, polygons_gdf[['geometry']], how='inner', predicate='within')
+    
+    # Count by index_right (grid index)
+    counts = joined.groupby('index_right')['count_val'].count()
+    
+    # Map back to grid
+    return polygons_gdf.index.map(counts).fillna(0).astype(int)
+
+print("Calculating features (stop counts per cell) for ALL modes...")
+
+MODE_NAMES = ["Interurban", "Urban", "Metro", "EMT", "Metro_Ligero"]
+# Calculate counts for ALL modes first
+for i, name in enumerate(MODE_NAMES):
+    col_name = f'count_{name}'
+    print(f"  Counting stops for {name}...")
+    gdf_ml_grid[col_name] = count_points_in_polygons(gdf_ml_grid, list_dfs_stops[i])
+
+print("????????????????????????????????????", gdf_ml_grid.info())
+
+# Population Density
+# We can reuse the logic from earlier or re-calculate for this specific grid
+# Let's map the municipality population density to these grid cells
+gdf_ml_grid['centroid'] = gdf_ml_grid.geometry.centroid
+gdf_ml_grid_pop = gpd.sjoin(
+    gpd.GeoDataFrame(gdf_ml_grid[['centroid']], geometry='centroid'),
+    gdf_choropleth[['geometry', 'pop_density']], # Reuse gdf_choropleth which has pop_density
+    how='left',
+    predicate='within'
+)
+gdf_ml_grid['pop_density'] = gdf_ml_grid_pop['pop_density'].values
+gdf_ml_grid['pop_density'] = gdf_ml_grid['pop_density'].fillna(0)
+
+print("????????????????????????????????????", gdf_ml_grid.info())
+
+
+for i, target_name in enumerate(MODE_NAMES):
+    print(f"\n--- Training Model for Target: {target_name} ---")
+    target_col = f'count_{target_name}'
+    y = gdf_ml_grid[target_col]
+
+    feature_cols = [f'count_{name}' for j, name in enumerate(MODE_NAMES) if j != i]
+    feature_cols.append('pop_density')
+
+    X = gdf_ml_grid[feature_cols]
+    print(f"Features: {feature_cols}")
+    
+    # Split
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    
+    # Train
+    rf_model = RandomForestRegressor(n_estimators=50, random_state=42) # Reduced estimators for speed in loop
+    rf_model.fit(X_train, y_train)
+    
+    # Evaluate
+    y_pred = rf_model.predict(X_test)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    r2 = r2_score(y_test, y_pred)
+    
+    print(f"Results for {target_name} -> RMSE: {rmse:.4f}, R2: {r2:.4f}")
+    
+    # Feature Importance
+    importances = rf_model.feature_importances_
+    feature_imp_df = pd.DataFrame({'Feature': X.columns, 'Importance': importances}).sort_values(by='Importance', ascending=False)
+    print("Top 3 Features:")
+    print(feature_imp_df.head(3))
+    
+    # --- 4. Visualization per Mode ---
+    print(f"Generating Prediction Map for {target_name}...")
+    
+    # Predict on full grid
+    gdf_ml_grid[f'pred_{target_name}'] = rf_model.predict(X)
+    
+    fig_ml, (ax_ml1, ax_ml2) = plt.subplots(1, 2, figsize=(20, 10))
+    
+    # Actual
+    gdf_madrid_boundaries.plot(ax=ax_ml1, facecolor='none', edgecolor='black', linewidth=0.3, alpha=0.5)
+    gdf_ml_grid.plot(column=target_col, ax=ax_ml1, cmap='viridis', legend=True, alpha=0.6)
+    ax_ml1.set_title(f"Actual {target_name} Density")
+    ax_ml1.axis('off')
+    
+    # Predicted
+    gdf_madrid_boundaries.plot(ax=ax_ml2, facecolor='none', edgecolor='black', linewidth=0.3, alpha=0.5)
+    gdf_ml_grid.plot(column=f'pred_{target_name}', ax=ax_ml2, cmap='viridis', legend=True, alpha=0.6)
+    ax_ml2.set_title(f"Predicted {target_name} Density (R2={r2:.2f})")
+    ax_ml2.axis('off')
+    
+    output_img = f"ML_Prediction_{target_name}.png"
+    plt.savefig(output_img, dpi=300, bbox_inches='tight')
+    print(f"Saved '{output_img}'")
+    plt.close(fig_ml) # Close figure to free memory
+
+def export_csv(gdf):
+    output_ml_csv = "ML_Predictions_All_Modes.csv"
+    # Export centroid lat/lon and all counts/predictions
+    gdf_export_ml = gdf.copy()
+    gdf_export_ml['lat'] = gdf_export_ml.geometry.centroid.to_crs(epsg=4326).y
+    gdf_export_ml['lon'] = gdf_export_ml.geometry.centroid.to_crs(epsg=4326).x
+    df_export_ml = pd.DataFrame(gdf_export_ml.drop(columns=['geometry', 'centroid']))
+    df_export_ml.to_csv(output_ml_csv, index=False, sep=';')
+    print(f"All ML Predictions saved to '{output_ml_csv}'")
