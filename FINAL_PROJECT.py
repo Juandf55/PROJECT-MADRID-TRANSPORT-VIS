@@ -41,7 +41,7 @@ def fill_gdf_madrid_boundaries():
         print("::::::::::::::::::::::::::::::::::::::::::" + "\n")
         print("GDF_MADRID_BOUNDARIES BEFORE TRANSFORMATION :", gdf_madrid_boundaries.head())
         gdf_madrid_boundaries = gdf_madrid_boundaries.to_crs(epsg=3857) # transformation to epsg 3857 standard for all of my maps.
-        # as idem_cm_unid_admin is in EPSG:25830 (ETRS89 UTM huso 30)
+        # as idem_cm_unid_admin is in EPSG:25830 (ETRS89 UTM uso 30)
         print("GDF_MADRID_BOUNDARIES AFTER TRANSFORMATION :", gdf_madrid_boundaries.head())
         print("GDF_MADRID_BOUNDARIES INFO :", gdf_madrid_boundaries.info())
         print("::::::::::::::::::::::::::::::::::::::::::" + "\n")
