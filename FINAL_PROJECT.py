@@ -750,6 +750,26 @@ if __name__ == "__main__":
         aspect='auto'
     )
 
+    # Add Municipality Names (Style matched to Choropleth)
+    for idx, row in gdf_choropleth.iterrows():
+        pop = row['Total']
+        if pop > POPULATION_THRESHOLD:
+            point = row.geometry.representative_point().coords[0]
+            name = row['DS_NOMBRE'] if pd.notnull(row['DS_NOMBRE']) else ""
+            # Only showing name as per plan, keeping style identical
+            label_text = name 
+            
+            ax3.annotate(
+                text=label_text,
+                xy=point,
+                ha='center',
+                va='center',
+                fontsize=6, 
+                color='white',
+                fontweight='bold',
+                path_effects=[pe.withStroke(linewidth=2, foreground="black")]
+            )
+
     ax3.set_title("Madrid Market Opportunity Map (Red=High, Blue=Low)", fontsize=20)
     ax3.axis('off')
 
